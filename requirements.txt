@@ -1,0 +1,4 @@
+beautifulsoup4==4.12.2
+kdl==0.2.21
+Requests==2.31.0
+selenium==4.9.0
