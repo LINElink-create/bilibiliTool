@@ -1,4 +1,4 @@
-# Bilibili_Spider_by_UserID
+# bilibiliTools
 
 Python 爬取B站（bilibili.com）UP主的所有视频链接及详细信息
 
@@ -6,53 +6,13 @@ Python 爬取B站（bilibili.com）UP主的所有视频链接及详细信息
 
 # 环境准备
 
-- selenium
-- bs4
 
-### 安装
-
-这里使用 conda 安装，也可使用 pip
-
-```bash
-conda install selenium bs4
-```
-
-selenium是一个操作浏览器的 Python 库，**需要安装相应的浏览器驱动**，如 firefox：
-
-```bash
-conda install gtk3 firefox -c conda-forge
-```
-
-此外还需要 `geckodriver` ，可前往 github 下载，并放置于 `/usr/local/bin/`：
-
-- mozilla/geckodriver：[https://github.com/mozilla/geckodriver/releases](https://github.com/mozilla/geckodriver/releases)
-
-> - 也可以放置在自定义路径下（但须为环境变量能够找到的地方），如非管理员用户可放置于自己 home 目录下的 `~/bin` 目录下，并将该路径添加进环境变量：
->
-> ```bash
-> export PATH=~/bin${PATH:+:${PATH}}
-> ```
->
-> 如果需要永久将 `~/bin` 路径添加进环境变量，则将上述语句添加进 `~/.bashrc` 文件末尾即可（重启命令行生效，或手动输入`source ~/.bashrc` 在当前命令行激活）。
->
-> - Windows 需下载对应 windows 版本并放置于环境变量能够找到的地方，或手动将 `geckodriver` 所在路径加入 `PATH` 中，并重启。
 
 
 
 # 快速使用
 
-### 1. 安装依赖
 
-见上一节环境准备部分，安装对应依赖环境。
-
-### 2. Clone 代码
-
-```python
-# Github (国内访问网速不佳者可使用 Gitee)
-git clone https://github.com/xieqk/Bilibili_Spider_by_UserID.git
-# Gitee
-git clone https://gitee.com/xieqk/Bilibili_Spider_by_UserID.git
-```
 
 ### 3. 查看 B 站用户  uid
 
