@@ -10,3 +10,10 @@ venv/
 build/
 dist/
 data/
+.pytest_cache/
+.mypy_cache/
+downloads/
+exports/
+logs/
+
+*.egg-info/

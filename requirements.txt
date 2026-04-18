@@ -1,6 +1,2 @@
-beautifulsoup4==4.12.2
-kdl==0.2.21
-Requests==2.31.0
-selenium==4.9.0
-PySide6==6.9.0
-yt-dlp==2025.12.8
+# Use the local pyproject as the single dependency source of truth.
+-e .
