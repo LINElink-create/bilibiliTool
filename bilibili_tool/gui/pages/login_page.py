@@ -4,6 +4,7 @@ import json
 
 from bilibili_tool.application import AppContext
 from bilibili_tool.infra.browser import BrowserCookieCollector, BrowserProfileManager
+from bilibili_tool.gui.theme import card_frame, page_root
 
 
 class LoginPage:
@@ -26,39 +27,72 @@ class LoginPage:
         """构造登录页面，并优先尝试恢复已保存会话。"""
 
         from PySide6.QtCore import QTimer
-        from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+        from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
         language = self.context.settings.ui_language
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        widget, layout = page_root()
 
-        title_label = QLabel("<h2>本地登录</h2>" if language == "zh-CN" else "<h2>Local Login</h2>")
+        title_label = QLabel("本地登录" if language == "zh-CN" else "Local Login")
+        title_label.setObjectName("pageTitle")
+        subtitle = QLabel(
+            "通过内嵌浏览器完成真实登录，程序会在检测到可用 Cookie 后自动保存本地会话。"
+            if language == "zh-CN"
+            else "Sign in through the embedded browser. The app saves the local session once required cookies are detected."
+        )
+        subtitle.setObjectName("pageSubtitle")
+        subtitle.setWordWrap(True)
         layout.addWidget(title_label)
+        layout.addWidget(subtitle)
 
-        status_row = QHBoxLayout()
-        status_row.setSpacing(12)
+        content = QGridLayout()
+        content.setSpacing(14)
+
+        browser_panel = card_frame()
+        browser_layout = QVBoxLayout(browser_panel)
+        browser_layout.setContentsMargins(12, 12, 12, 12)
+        browser_layout.setSpacing(10)
+        browser_title = QLabel("Bilibili 登录窗口" if language == "zh-CN" else "Bilibili Sign-In Window")
+        browser_title.setObjectName("sectionTitle")
+        browser_layout.addWidget(browser_title)
 
         self.state_label = QLabel()
-        status_row.addWidget(self.state_label, stretch=1)
-
-        self.save_session_button = QPushButton()
-        self.save_session_button.setMinimumHeight(38)
-        self.save_session_button.clicked.connect(self._save_captured_session)
-        status_row.addWidget(self.save_session_button)
-        layout.addLayout(status_row)
-
-        browser_panel = QFrame()
-        browser_panel.setFrameShape(QFrame.StyledPanel)
-        browser_layout = QVBoxLayout(browser_panel)
-        browser_layout.setContentsMargins(0, 0, 0, 0)
-        browser_layout.setSpacing(0)
+        self.state_label.setObjectName("mutedText")
 
         browser_widget = self._build_browser_widget()
         browser_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         browser_layout.addWidget(browser_widget, stretch=1)
-        layout.addWidget(browser_panel, stretch=1)
+        content.addWidget(browser_panel, 0, 0)
+
+        side_card = card_frame()
+        side_layout = QVBoxLayout(side_card)
+        side_layout.setContentsMargins(18, 16, 18, 18)
+        side_layout.setSpacing(12)
+        side_title = QLabel("会话保存" if language == "zh-CN" else "Session Save")
+        side_title.setObjectName("sectionTitle")
+        side_layout.addWidget(side_title)
+        side_layout.addWidget(self.state_label)
+        for cookie_name in ("SESSDATA", "bili_jct", "DedeUserID"):
+            chip = QLabel(cookie_name)
+            chip.setObjectName("statusPill")
+            side_layout.addWidget(chip)
+        self.save_session_button = QPushButton()
+        self.save_session_button.setObjectName("primaryButton")
+        self.save_session_button.setMinimumHeight(38)
+        self.save_session_button.clicked.connect(self._save_captured_session)
+        side_layout.addWidget(self.save_session_button)
+        info = QLabel(
+            "会话仅保存在本地数据库和浏览器 profile 中，不会上传到其他服务。"
+            if language == "zh-CN"
+            else "The session is stored only in the local database and browser profile."
+        )
+        info.setObjectName("mutedText")
+        info.setWordWrap(True)
+        side_layout.addWidget(info)
+        side_layout.addStretch(1)
+        content.addWidget(side_card, 0, 1)
+        content.setColumnStretch(0, 3)
+        content.setColumnStretch(1, 1)
+        layout.addLayout(content, 1)
 
         self._restore_saved_session()
         self._refresh_capture_summary()

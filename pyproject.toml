@@ -20,6 +20,11 @@ dependencies = [
   "yt-dlp>=2025.3.31",
 ]
 
+[project.optional-dependencies]
+build = [
+  "pyinstaller>=6.0",
+]
+
 [project.scripts]
 bilibili-tool = "bilibili_tool.app.main:main"
 

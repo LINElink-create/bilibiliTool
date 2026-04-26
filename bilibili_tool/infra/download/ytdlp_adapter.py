@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -127,6 +128,12 @@ class YtDlpAdapter:
         """执行一次真实下载，并按环境能力决定是否启用 ffmpeg 合并。"""
 
         ffmpeg_status = self.inspect_ffmpeg()
+        if not ffmpeg_status.available and not self._should_set_format(task.format_selector):
+            return self._download_separate_streams(
+                task=task,
+                cookie_file_path=cookie_file_path,
+                progress_hook=progress_hook,
+            )
 
         try:
             return self._download_with_selector(
@@ -331,15 +338,39 @@ class YtDlpAdapter:
         if binary_path:
             candidates.append(Path(binary_path))
 
-        prefix = Path(sys.prefix)
-        candidates.extend(
-            [
+        prefixes: list[Path] = []
+
+        def add_prefix(value: str | Path | None) -> None:
+            if not value:
+                return
+            prefix = Path(value)
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+
+        add_prefix(os.environ.get("CONDA_PREFIX"))
+        add_prefix(sys.prefix)
+        if getattr(sys, "frozen", False):
+            add_prefix(Path(sys.executable).resolve().parent)
+        bundle_dir = getattr(sys, "_MEIPASS", None)
+        add_prefix(bundle_dir)
+
+        home = Path.home()
+        for root in (Path(sys.prefix), home / "anaconda3", home / "miniconda3"):
+            add_prefix(root)
+            add_prefix(root / "envs" / "bilibiliTool")
+
+        seen: set[Path] = set()
+        for prefix in prefixes:
+            for candidate in (
                 prefix / executable_name,
                 prefix / "Scripts" / executable_name,
                 prefix / "Library" / "bin" / executable_name,
                 prefix / "bin" / executable_name,
-            ]
-        )
+                prefix / "ffmpeg" / executable_name,
+            ):
+                if candidate not in seen:
+                    seen.add(candidate)
+                    candidates.append(candidate)
         return candidates
 
     @staticmethod

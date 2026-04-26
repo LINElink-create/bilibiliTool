@@ -2,16 +2,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from bilibili_tool.infra.bilibili import BilibiliClient
+from bilibili_tool.application.services import SourceService
+from bilibili_tool.domain import SourceKind, SourceSyncResult
 
 
 @dataclass(slots=True)
 class SyncWorker:
-    """同步 worker 入口，占位给下一阶段接上来源抓取。"""
+    """同步 worker 入口，按来源类型执行一次分页同步。"""
 
-    client: BilibiliClient
+    service: SourceService
 
-    def run_once(self) -> None:
-        """下一阶段会在这里消费来源并写入视频元数据。"""
+    def run_once(self, kind: SourceKind, value: str, *, max_pages: int = 20) -> SourceSyncResult:
+        """同步一个来源。"""
 
-        raise NotImplementedError("Sync worker is planned for the next milestone.")
+        if kind is SourceKind.USER:
+            return self.service.sync_user_archive(value, max_pages=max_pages)
+        if kind is SourceKind.FAVORITE:
+            return self.service.sync_favorite_all(value, max_pages=max_pages)
+        raise ValueError("SyncWorker only supports user and favorite sources.")

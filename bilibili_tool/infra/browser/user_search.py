@@ -129,7 +129,7 @@ class BrowserUserSearch:
         from PySide6.QtWidgets import QApplication
 
         if QApplication.instance() is None:
-            raise RuntimeError("Qt application is not running.")
+            QApplication([])
 
         page = QWebEnginePage(self._get_profile(), None)
         loop = QEventLoop()

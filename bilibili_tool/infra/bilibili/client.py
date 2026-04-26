@@ -14,8 +14,6 @@ from bilibili_tool.domain import (
     QrLoginDraft,
     QrLoginInitResult,
     QrLoginPollResult,
-    UserProbeCandidate,
-    UserProbeResult,
     VideoRecord,
 )
 
@@ -26,6 +24,11 @@ class BilibiliClient:
 
     settings: AppSettings
     cookies: dict[str, str] = field(default_factory=dict)
+
+    def set_cookies(self, cookies: dict[str, str]) -> None:
+        """更新后续请求要携带的 Cookie。"""
+
+        self.cookies = {key: value for key, value in cookies.items() if value}
 
     def build_session(self) -> httpx.Client:
         """创建带默认请求头和 Cookie 的同步客户端。"""
@@ -136,130 +139,14 @@ class BilibiliClient:
             refresh_token=data.get("refresh_token"),
         )
 
-    def build_user_lookup_preview(self, keyword: str) -> ApiCallPreview:
-        """预览通过用户名搜索 UP 主时会调用的接口。"""
-
-        sanitized = keyword.strip() or "<empty>"
-        return ApiCallPreview(
-            name="按用户名搜索 UP 主",
-            method="GET",
-            url=f"https://api.bilibili.com/x/web-interface/search/type?search_type=bili_user&keyword={sanitized}",
-            purpose="根据用户名搜索候选 UP 主，再由用户确认目标 UID。",
-        )
-
-    def search_users(self, keyword: str) -> UserProbeResult:
-        """真实请求一次用户名搜索接口，并返回可用于确认的候选用户。"""
-
-        try:
-            payload = self._request_json(
-                "https://api.bilibili.com/x/web-interface/search/type",
-                params={"search_type": "bili_user", "keyword": keyword, "page": 1},
-            )
-        except RuntimeError as exc:
-            return UserProbeResult(
-                success=False,
-                input_mode="user_name",
-                input_value=keyword,
-                message=f"用户名搜索失败：{exc}",
-                items=(),
-                candidates=(),
-            )
-
-        code = int(payload.get("code", -1))
-        if code != 0:
-            return UserProbeResult(
-                success=False,
-                input_mode="user_name",
-                input_value=keyword,
-                message=f"用户名搜索被拦截或失败：code={code} message={payload.get('message')}",
-                items=(),
-                candidates=(),
-            )
-
-        result = payload.get("data", {}).get("result") or []
-        candidates = tuple(
-            UserProbeCandidate(
-                uid=str(item.get("mid")),
-                name=str(item.get("uname") or item.get("mid")),
-                homepage_url=f"https://space.bilibili.com/{item.get('mid')}",
-                fans=int(item.get("fans")) if item.get("fans") is not None else None,
-                sign=item.get("usign") or None,
-            )
-            for item in result[:8]
-            if item.get("mid")
-        )
-        items = tuple(
-            f"{item.get('uname')} | mid={item.get('mid')} | fans={item.get('fans')}"
-            for item in result[:5]
-        )
-        return UserProbeResult(
-            success=True,
-            input_mode="user_name",
-            input_value=keyword,
-            message=f"用户名搜索成功，返回 {len(result)} 条候选用户。",
-            items=items,
-            candidates=candidates,
-        )
-
     def build_user_video_preview(self, uid: str) -> ApiCallPreview:
-        """预览通过 UID 拉取投稿列表时会调用的接口。"""
+        """预览通过空间投稿网页同步时会访问的页面。"""
 
         return ApiCallPreview(
-            name="按 UID 拉取投稿",
+            name="按 UID 打开投稿网页",
             method="GET",
-            url=f"https://api.bilibili.com/x/space/wbi/arc/search?mid={uid}",
-            purpose="读取指定 UID 的投稿列表，并分页同步到本地资源库。",
-        )
-
-    def fetch_user_profile(self, uid: str) -> UserProbeResult:
-        """真实请求一次 UID 信息接口，用于验证该 UID 是否可访问。"""
-
-        try:
-            payload = self._request_json(
-                "https://api.bilibili.com/x/space/acc/info",
-                params={"mid": uid},
-            )
-        except RuntimeError as exc:
-            return UserProbeResult(
-                success=False,
-                input_mode="uid",
-                input_value=uid,
-                message=f"UID 查询失败：{exc}",
-                items=(),
-                candidates=(),
-            )
-
-        code = int(payload.get("code", -1))
-        data = payload.get("data") or {}
-        if code != 0:
-            return UserProbeResult(
-                success=False,
-                input_mode="uid",
-                input_value=uid,
-                message=f"UID 查询失败：code={code} message={payload.get('message')}",
-                items=(),
-                candidates=(),
-            )
-
-        return UserProbeResult(
-            success=True,
-            input_mode="uid",
-            input_value=uid,
-            message="UID 查询成功。",
-            items=(
-                f"name={data.get('name')}",
-                f"mid={data.get('mid')}",
-                f"level={data.get('level')}",
-                f"sign={data.get('sign') or ''}",
-            ),
-            candidates=(
-                UserProbeCandidate(
-                    uid=str(data.get("mid")),
-                    name=str(data.get("name") or data.get("mid")),
-                    homepage_url=f"https://space.bilibili.com/{data.get('mid')}",
-                    sign=data.get("sign") or None,
-                ),
-            ),
+            url=f"https://space.bilibili.com/{uid}/video?tid=0&pn=1&keyword=&order=pubdate",
+            purpose="模拟浏览器打开 UP 主空间投稿页，渲染后从网页内容中提取 BV、标题和卡片信息。",
         )
 
     def build_favorite_preview(self, favorite_id: str) -> ApiCallPreview:

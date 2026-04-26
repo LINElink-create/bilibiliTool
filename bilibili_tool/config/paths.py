@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,7 +22,12 @@ class AppPaths:
 def build_app_paths(root: Path | None = None) -> AppPaths:
     """基于项目根目录构建运行期路径，并和旧项目数据隔离。"""
 
-    project_root = root or Path.cwd()
+    if root is not None:
+        project_root = root
+    elif getattr(sys, "frozen", False):
+        project_root = Path(sys.executable).resolve().parent
+    else:
+        project_root = Path.cwd()
     data_dir = project_root / "data"
     logs_dir = project_root / "logs"
     exports_dir = project_root / "exports"

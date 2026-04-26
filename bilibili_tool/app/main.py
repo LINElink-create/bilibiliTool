@@ -46,6 +46,18 @@ def build_parser() -> argparse.ArgumentParser:
     sync_favorite_parser.add_argument("--value", required=True, help="A favorite ID or favorite URL.")
     sync_favorite_parser.add_argument("--name", help="Optional display name used for the saved source.")
 
+    sync_favorite_all_parser = subparsers.add_parser("sync-favorite-all", help="Fetch multiple favorite pages and write them into the local library.")
+    sync_favorite_all_parser.add_argument("--value", required=True, help="A favorite ID or favorite URL.")
+    sync_favorite_all_parser.add_argument("--name", help="Optional display name used for the saved source.")
+    sync_favorite_all_parser.add_argument("--page-size", type=int, default=20, help="Favorite page size.")
+    sync_favorite_all_parser.add_argument("--max-pages", type=int, default=20, help="Safety cap for favorite pages.")
+
+    sync_user_parser = subparsers.add_parser("sync-user-archive", help="Fetch multiple pages of a user's public archive.")
+    sync_user_parser.add_argument("--value", required=True, help="A UID or user homepage URL.")
+    sync_user_parser.add_argument("--name", help="Optional display name used for the saved source.")
+    sync_user_parser.add_argument("--page-size", type=int, default=30, help="User archive page size.")
+    sync_user_parser.add_argument("--max-pages", type=int, default=20, help="Safety cap for user archive pages.")
+
     subparsers.add_parser("list-sources", help="List all tracked sources.")
     subparsers.add_parser("list-videos", help="List recent cached videos.")
     subparsers.add_parser("list-downloads", help="List queued download tasks.")
@@ -55,10 +67,41 @@ def build_parser() -> argparse.ArgumentParser:
     queue_download_parser.add_argument("--name", required=True, help="Human-readable task name.")
     queue_download_parser.add_argument("--format", default="auto", help="yt-dlp format selector. Use auto to let yt-dlp decide.")
 
+    queue_video_parser = subparsers.add_parser("queue-video", help="Queue one local library video by database ID.")
+    queue_video_parser.add_argument("--video-id", type=int, required=True, help="Local video ID from list-videos.")
+    queue_video_parser.add_argument("--format", default="auto", help="yt-dlp format selector. Use auto to let yt-dlp decide.")
+
+    queue_source_parser = subparsers.add_parser("queue-source-downloads", help="Queue all locally synced videos for one source.")
+    queue_source_parser.add_argument("--source-id", type=int, required=True, help="Source ID from list-sources.")
+    queue_source_parser.add_argument("--limit", type=int, default=500, help="Maximum videos to queue.")
+    queue_source_parser.add_argument("--format", default="auto", help="yt-dlp format selector. Use auto to let yt-dlp decide.")
+
+    queue_library_parser = subparsers.add_parser("queue-library-downloads", help="Queue recent videos from the whole local library.")
+    queue_library_parser.add_argument("--limit", type=int, default=500, help="Maximum videos to queue.")
+    queue_library_parser.add_argument("--format", default="auto", help="yt-dlp format selector. Use auto to let yt-dlp decide.")
+
     download_video_parser = subparsers.add_parser("download-video", help="Download a single BV id or video URL immediately.")
     download_video_parser.add_argument("--value", required=True, help="A BV id or bilibili video URL.")
     download_video_parser.add_argument("--name", help="Optional display name shown in the downloads table.")
     download_video_parser.add_argument("--format", default="auto", help="yt-dlp format selector. Use auto to let yt-dlp decide.")
+
+    run_download_parser = subparsers.add_parser("run-download", help="Run one queued download task by ID.")
+    run_download_parser.add_argument("--task-id", type=int, required=True, help="Download task ID from list-downloads.")
+
+    run_queue_parser = subparsers.add_parser("run-download-queue", help="Run pending downloads sequentially.")
+    run_queue_parser.add_argument("--limit", type=int, default=0, help="Maximum tasks to run; 0 means run until empty.")
+
+    retry_download_parser = subparsers.add_parser("retry-download", help="Reset a failed download back to pending.")
+    retry_download_parser.add_argument("--task-id", type=int, required=True, help="Download task ID from list-downloads.")
+
+    pause_download_parser = subparsers.add_parser("pause-download", help="Pause a pending download task.")
+    pause_download_parser.add_argument("--task-id", type=int, required=True, help="Download task ID from list-downloads.")
+
+    resume_download_parser = subparsers.add_parser("resume-download", help="Resume a paused download task.")
+    resume_download_parser.add_argument("--task-id", type=int, required=True, help="Download task ID from list-downloads.")
+
+    cancel_download_parser = subparsers.add_parser("cancel-download", help="Cancel a queued download task.")
+    cancel_download_parser.add_argument("--task-id", type=int, required=True, help="Download task ID from list-downloads.")
 
     list_formats_parser = subparsers.add_parser("list-video-formats", help="Inspect the real formats available for one BV id or video URL.")
     list_formats_parser.add_argument("--value", required=True, help="A BV id or bilibili video URL.")
@@ -220,6 +263,50 @@ def command_sync_favorite_once(value: str, name: str | None) -> int:
     return 0
 
 
+def command_sync_favorite_all(value: str, name: str | None, page_size: int, max_pages: int) -> int:
+    """把收藏夹多页同步进本地资源库。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    result = context.source_service.sync_favorite_all(
+        raw_value=value,
+        display_name=name,
+        page_size=page_size,
+        max_pages=max_pages,
+    )
+    _print_source_sync_result(result)
+    return 0 if result.success else 1
+
+
+def command_sync_user_archive(value: str, name: str | None, page_size: int, max_pages: int) -> int:
+    """把 UP 主投稿历史同步进本地资源库。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    result = context.source_service.sync_user_archive(
+        raw_value=value,
+        display_name=name,
+        page_size=page_size,
+        max_pages=max_pages,
+    )
+    _print_source_sync_result(result)
+    return 0 if result.success else 1
+
+
+def _print_source_sync_result(result) -> None:
+    """统一打印分页同步结果。"""
+
+    print(f"success={result.success}")
+    print(f"source_id={result.source_id}")
+    print(f"source_name={result.source_name}")
+    print(f"source_kind={result.source_kind.value}")
+    print(f"message={result.message}")
+    print(f"page_count={result.page_count}")
+    print(f"synced_count={result.synced_count}")
+    print(f"new_count={result.new_count}")
+    print(f"updated_count={result.updated_count}")
+
+
 def command_add_source(kind: str, value: str, name: str | None) -> int:
     """写入一个新的来源配置。"""
 
@@ -270,6 +357,50 @@ def command_queue_download(url: str, name: str, format_selector: str) -> int:
     return 0
 
 
+def command_queue_video(video_id: int, format_selector: str) -> int:
+    """把单个资源库视频加入下载队列。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    task_id, created = context.download_service.queue_video_id(video_id=video_id, format_selector=format_selector)
+    print(f"task_id={task_id}")
+    print(f"created={created}")
+    return 0
+
+
+def command_queue_source_downloads(source_id: int, limit: int, format_selector: str) -> int:
+    """把某个来源的视频批量加入下载队列。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    result = context.download_service.queue_source_videos(
+        source_id=source_id,
+        limit=limit,
+        format_selector=format_selector,
+    )
+    _print_queue_result(result)
+    return 0
+
+
+def command_queue_library_downloads(limit: int, format_selector: str) -> int:
+    """把资源库视频批量加入下载队列。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    result = context.download_service.queue_library_videos(limit=limit, format_selector=format_selector)
+    _print_queue_result(result)
+    return 0
+
+
+def _print_queue_result(result) -> None:
+    """统一打印批量入队结果。"""
+
+    print(f"queued_count={result.queued_count}")
+    print(f"skipped_count={result.skipped_count}")
+    print(f"task_ids={','.join(str(task_id) for task_id in result.task_ids)}")
+    print(f"message={result.message}")
+
+
 def command_download_video(value: str, name: str | None, format_selector: str) -> int:
     """解析单视频输入并立刻执行下载。"""
 
@@ -286,6 +417,80 @@ def command_download_video(value: str, name: str | None, format_selector: str) -
     print(f"file_path={task.file_path}")
     print(f"error_message={task.error_message}")
     return 0 if task.status.value == "success" else 1
+
+
+def command_run_download(task_id: int) -> int:
+    """执行一个已经排队的下载任务。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    task = context.download_service.run_task(task_id)
+    _print_download_task(task)
+    return 0 if task.status.value == "success" else 1
+
+
+def command_run_download_queue(limit: int) -> int:
+    """顺序执行 pending 下载队列。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    tasks = context.download_service.run_queue(limit=limit)
+    print(f"executed_count={len(tasks)}")
+    for task in tasks:
+        _print_download_task(task)
+    return 0 if all(task.status.value == "success" for task in tasks) else 1
+
+
+def command_retry_download(task_id: int) -> int:
+    """把失败下载重置为 pending。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    task = context.download_service.retry_task(task_id)
+    _print_download_task(task)
+    return 0
+
+
+def command_pause_download(task_id: int) -> int:
+    """暂停 pending 下载。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    task = context.download_service.pause_task(task_id)
+    _print_download_task(task)
+    return 0
+
+
+def command_resume_download(task_id: int) -> int:
+    """恢复 paused 下载。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    task = context.download_service.resume_task(task_id)
+    _print_download_task(task)
+    return 0
+
+
+def command_cancel_download(task_id: int) -> int:
+    """取消未完成下载。"""
+
+    context = build_context()
+    context.workspace_service.initialize()
+    task = context.download_service.cancel_task(task_id)
+    _print_download_task(task)
+    return 0
+
+
+def _print_download_task(task) -> None:
+    """统一打印下载任务。"""
+
+    print(f"task_id={task.id}")
+    print(f"status={task.status.value}")
+    print(f"display_name={task.display_name}")
+    print(f"source_url={task.source_url}")
+    print(f"file_path={task.file_path}")
+    print(f"progress={task.progress}")
+    print(f"error_message={task.error_message}")
 
 
 def command_list_video_formats(value: str) -> int:
@@ -358,6 +563,20 @@ def main() -> int:
         return command_probe_favorite(value=args.value)
     if args.command == "sync-favorite-once":
         return command_sync_favorite_once(value=args.value, name=args.name)
+    if args.command == "sync-favorite-all":
+        return command_sync_favorite_all(
+            value=args.value,
+            name=args.name,
+            page_size=args.page_size,
+            max_pages=args.max_pages,
+        )
+    if args.command == "sync-user-archive":
+        return command_sync_user_archive(
+            value=args.value,
+            name=args.name,
+            page_size=args.page_size,
+            max_pages=args.max_pages,
+        )
     if args.command == "add-source":
         return command_add_source(kind=args.kind, value=args.value, name=args.name)
     if args.command == "list-sources":
@@ -366,8 +585,30 @@ def main() -> int:
         return command_list_videos()
     if args.command == "queue-download":
         return command_queue_download(url=args.url, name=args.name, format_selector=args.format)
+    if args.command == "queue-video":
+        return command_queue_video(video_id=args.video_id, format_selector=args.format)
+    if args.command == "queue-source-downloads":
+        return command_queue_source_downloads(
+            source_id=args.source_id,
+            limit=args.limit,
+            format_selector=args.format,
+        )
+    if args.command == "queue-library-downloads":
+        return command_queue_library_downloads(limit=args.limit, format_selector=args.format)
     if args.command == "download-video":
         return command_download_video(value=args.value, name=args.name, format_selector=args.format)
+    if args.command == "run-download":
+        return command_run_download(task_id=args.task_id)
+    if args.command == "run-download-queue":
+        return command_run_download_queue(limit=args.limit)
+    if args.command == "retry-download":
+        return command_retry_download(task_id=args.task_id)
+    if args.command == "pause-download":
+        return command_pause_download(task_id=args.task_id)
+    if args.command == "resume-download":
+        return command_resume_download(task_id=args.task_id)
+    if args.command == "cancel-download":
+        return command_cancel_download(task_id=args.task_id)
     if args.command == "list-video-formats":
         return command_list_video_formats(value=args.value)
     if args.command == "list-downloads":

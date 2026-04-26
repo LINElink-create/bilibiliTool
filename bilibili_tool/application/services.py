@@ -20,6 +20,7 @@ from bilibili_tool.domain import (
     AuthSession,
     BrowserSessionSnapshot,
     DashboardSummary,
+    DownloadQueueResult,
     DownloadStatus,
     DownloadTask,
     FavoriteProbeResult,
@@ -31,6 +32,7 @@ from bilibili_tool.domain import (
     SourceKind,
     SourcePreview,
     SourceRecord,
+    SourceSyncResult,
     SyncTask,
     SyncTaskStatus,
     UserProbeResult,
@@ -39,6 +41,7 @@ from bilibili_tool.domain import (
 )
 from bilibili_tool.infra.download import YtDlpAdapter
 from bilibili_tool.infra.bilibili import BilibiliClient
+from bilibili_tool.infra.browser import BrowserUserArchiveScraper, BrowserUserSearch
 from bilibili_tool.infra.db import (
     AuthSessionRepository,
     Database,
@@ -131,7 +134,7 @@ class SourceInputParser:
             resolved_key=None,
             canonical_url=None,
             is_ready_for_save=False,
-            message="当前识别为用户名。后续需要通过搜索接口先解析成 UID 再保存。",
+            message="当前识别为用户名。后续需要通过浏览器搜索页先解析成 UID 再保存。",
         )
 
     def _preview_favorite(self, value: str, display_name: str | None) -> SourcePreview:
@@ -221,12 +224,18 @@ class SourceService:
         video_repository: VideoRepository,
         sync_task_repository: SyncTaskRepository,
         client: BilibiliClient,
+        auth_session_repository: AuthSessionRepository,
+        user_archive_scraper: BrowserUserArchiveScraper,
+        browser_user_search: BrowserUserSearch,
     ) -> None:
         self.parser = parser
         self.repository = repository
         self.video_repository = video_repository
         self.sync_task_repository = sync_task_repository
         self.client = client
+        self.auth_session_repository = auth_session_repository
+        self.user_archive_scraper = user_archive_scraper
+        self.browser_user_search = browser_user_search
 
     def preview_source(self, kind: SourceKind, raw_value: str, display_name: str | None = None) -> SourcePreview:
         """生成来源输入预览，供 GUI 和 CLI 做本地确认。"""
@@ -251,13 +260,42 @@ class SourceService:
 
         return self.repository.list_all()
 
+    def get_source_video_stats(self, source_id: int) -> tuple[int, int]:
+        """读取来源关联视频总数和发布时间覆盖数量，供管理台展示。"""
+
+        return self.video_repository.count_by_source(source_id)
+
+    def rename_source(self, source_id: int, display_name: str) -> SourceRecord:
+        """重命名本地来源文件夹。"""
+
+        cleaned_name = display_name.strip()
+        if not cleaned_name:
+            raise ValueError("Source name cannot be empty.")
+        if self.repository.get_by_id(source_id) is None:
+            raise ValueError(f"Source #{source_id} was not found.")
+        self.repository.rename(source_id, cleaned_name)
+        updated = self.repository.get_by_id(source_id)
+        if updated is None:
+            raise ValueError(f"Source #{source_id} could not be loaded after rename.")
+        return updated
+
+    def delete_source(self, source_id: int) -> None:
+        """删除本地来源及其视频关联，不删除下载文件。"""
+
+        if self.repository.get_by_id(source_id) is None:
+            raise ValueError(f"Source #{source_id} was not found.")
+        self.repository.delete(source_id)
+
     def describe_next_sync_step(self, preview: SourcePreview) -> str:
         """给来源预览补上未来实际同步时会调用的接口说明。"""
 
         if preview.kind is SourceKind.USER:
             if preview.resolved_key is None:
                 return "下一阶段将通过嵌入浏览器访问 B 站搜索页，定位目标 UP 主并提取 UID。"
-            return f"下一阶段会按 UID {preview.resolved_key} 拉取该 UP 主的历史稿件列表。"
+            return (
+                f"下一阶段会模拟浏览器打开 https://space.bilibili.com/{preview.resolved_key}/video "
+                "并从网页内容中提取该 UP 主的投稿列表。"
+            )
 
         if preview.kind is SourceKind.FAVORITE and preview.resolved_key is not None:
             api_preview = self.client.build_favorite_preview(preview.resolved_key)
@@ -270,19 +308,13 @@ class SourceService:
 
         preview = self.preview_source(kind=SourceKind.USER, raw_value=raw_value)
         if preview.resolved_key is not None:
-            return self.client.fetch_user_profile(preview.resolved_key)
-        return UserProbeResult(
-            success=False,
-            input_mode="user_name",
-            input_value=preview.input_value,
-            message="用户名探测已切换到 GUI 浏览器搜索流程，请从图形界面触发单次探测。",
-            items=(),
-            candidates=(),
-        )
+            return self.browser_user_search.inspect_user_homepage(preview.resolved_key)
+        return self.browser_user_search.search_users(preview.input_value)
 
     def probe_favorite_input(self, raw_value: str) -> FavoriteProbeResult:
         """对收藏夹输入做一次受控的真实校验。"""
 
+        self._refresh_client_cookies()
         preview = self.preview_source(kind=SourceKind.FAVORITE, raw_value=raw_value)
         if preview.resolved_key is None:
             raise ValueError(preview.message)
@@ -291,6 +323,7 @@ class SourceService:
     def sync_favorite_once(self, raw_value: str, display_name: str | None = None) -> FavoriteSyncResult:
         """把收藏夹第一页同步到本地资源库，避免高频抓取。"""
 
+        self._refresh_client_cookies()
         preview = self.preview_source(kind=SourceKind.FAVORITE, raw_value=raw_value, display_name=display_name)
         if preview.resolved_key is None:
             raise ValueError(preview.message)
@@ -370,6 +403,208 @@ class SourceService:
             updated_count=updated_count,
         )
 
+    def sync_favorite_all(
+        self,
+        raw_value: str,
+        display_name: str | None = None,
+        *,
+        page_size: int = 20,
+        max_pages: int = 20,
+    ) -> SourceSyncResult:
+        """分页同步整个收藏夹，默认设置上限以避免误触发超大抓取。"""
+
+        self._refresh_client_cookies()
+        preview = self.preview_source(kind=SourceKind.FAVORITE, raw_value=raw_value, display_name=display_name)
+        if preview.resolved_key is None:
+            raise ValueError(preview.message)
+
+        source_id = self.add_source(kind=SourceKind.FAVORITE, raw_value=raw_value, display_name=display_name)
+        source = self._require_source(source_id)
+        return self._sync_paged_source(
+            source=source,
+            stage="favorite_full",
+            page_size=page_size,
+            max_pages=max_pages,
+            fetch_page=lambda page: self.client.fetch_favorite_page(source.source_key, page=page, page_size=page_size),
+            stop_on_short_page=True,
+        )
+
+    def sync_user_archive(
+        self,
+        raw_value: str,
+        display_name: str | None = None,
+        *,
+        page_size: int = 60,
+        max_pages: int = 20,
+    ) -> SourceSyncResult:
+        """分页同步 UP 主投稿历史。"""
+
+        self._refresh_client_cookies()
+        preview = self.preview_source(kind=SourceKind.USER, raw_value=raw_value, display_name=display_name)
+        if preview.resolved_key is None:
+            raise ValueError("请先通过 GUI 的用户名探测选择候选 UID，或直接传入 UID/用户主页链接。")
+
+        source_id = self.add_source(kind=SourceKind.USER, raw_value=raw_value, display_name=display_name)
+        source = self._require_source(source_id)
+        return self._sync_paged_source(
+            source=source,
+            stage="user_archive",
+            page_size=page_size,
+            max_pages=max_pages,
+            fetch_page=lambda page: self.user_archive_scraper.fetch_page(
+                source.source_key,
+                page=page,
+                page_size=page_size,
+            ),
+            stop_on_short_page=False,
+        )
+
+    def _sync_paged_source(
+        self,
+        *,
+        source: SourceRecord,
+        stage: str,
+        page_size: int,
+        max_pages: int,
+        fetch_page,
+        stop_on_short_page: bool = True,
+    ) -> SourceSyncResult:
+        """执行分页来源同步，并把视频元数据写入资源库。"""
+
+        if source.id is None:
+            raise ValueError("Source must be saved before sync.")
+        if page_size <= 0 or max_pages <= 0:
+            raise ValueError("page_size and max_pages must be positive.")
+
+        self.sync_task_repository.create(
+            SyncTask(
+                source_id=source.id,
+                status=SyncTaskStatus.RUNNING,
+                stage=stage,
+                message=f"Starting {stage} sync.",
+                started_at=datetime.now(),
+            )
+        )
+
+        new_count = 0
+        updated_count = 0
+        synced_count = 0
+        pages_done = 0
+        last_message = ""
+        seen_bvids: set[str] = set()
+
+        for page in range(1, max_pages + 1):
+            fetch_result = fetch_page(page)
+            last_message = fetch_result.message
+            if not fetch_result.success:
+                if page == 1:
+                    self.sync_task_repository.create(
+                        SyncTask(
+                            source_id=source.id,
+                            status=SyncTaskStatus.FAILED,
+                            stage=stage,
+                            message=fetch_result.message,
+                            started_at=datetime.now(),
+                            finished_at=datetime.now(),
+                            items_total=synced_count,
+                            items_new=new_count,
+                            items_updated=updated_count,
+                        )
+                    )
+                    return SourceSyncResult(
+                        success=False,
+                        source_id=source.id,
+                        source_name=source.display_name,
+                        source_kind=source.kind,
+                        message=fetch_result.message,
+                        synced_count=synced_count,
+                        new_count=new_count,
+                        updated_count=updated_count,
+                        page_count=pages_done,
+                    )
+                break
+
+            if not fetch_result.videos:
+                break
+
+            fresh_videos = tuple(video for video in fetch_result.videos if video.bvid not in seen_bvids)
+            if not fresh_videos:
+                break
+
+            pages_done += 1
+            for video in fresh_videos:
+                seen_bvids.add(video.bvid)
+                video_id, is_new = self.video_repository.upsert(video)
+                self.video_repository.link_to_source(source.id, video_id)
+                synced_count += 1
+                if is_new:
+                    new_count += 1
+                else:
+                    updated_count += 1
+
+            if stop_on_short_page and len(fetch_result.videos) < page_size:
+                break
+
+        if pages_done:
+            self.repository.mark_synced(source.id)
+        summary_message = (
+            f"{source.display_name} 同步完成：分页 {pages_done} 页，写入 {synced_count} 条视频，"
+            f"新增 {new_count} 条，更新 {updated_count} 条。"
+        )
+        if not pages_done and last_message:
+            summary_message = last_message
+        self.sync_task_repository.create(
+            SyncTask(
+                source_id=source.id,
+                status=SyncTaskStatus.SUCCESS if pages_done else SyncTaskStatus.FAILED,
+                stage=stage,
+                message=summary_message,
+                started_at=datetime.now(),
+                finished_at=datetime.now(),
+                items_total=synced_count,
+                items_new=new_count,
+                items_updated=updated_count,
+            )
+        )
+        return SourceSyncResult(
+            success=pages_done > 0,
+            source_id=source.id,
+            source_name=source.display_name,
+            source_kind=source.kind,
+            message=summary_message,
+            synced_count=synced_count,
+            new_count=new_count,
+            updated_count=updated_count,
+            page_count=pages_done,
+        )
+
+    def _require_source(self, source_id: int) -> SourceRecord:
+        """读取刚保存的来源，不存在时给出明确错误。"""
+
+        source = self.repository.get_by_id(source_id)
+        if source is None:
+            raise ValueError("Saved source could not be loaded back from the database.")
+        return source
+
+    def _refresh_client_cookies(self) -> None:
+        """把本地活动登录态注入 API 客户端。"""
+
+        session = self.auth_session_repository.get_active()
+        if session is None:
+            self.client.set_cookies({})
+            self.user_archive_scraper.set_cookies({})
+            return
+        try:
+            cookies = json.loads(session.cookie_json)
+        except (TypeError, ValueError):
+            self.client.set_cookies({})
+            self.user_archive_scraper.set_cookies({})
+            return
+        if isinstance(cookies, dict):
+            normalized_cookies = {str(key): str(value) for key, value in cookies.items()}
+            self.client.set_cookies(normalized_cookies)
+            self.user_archive_scraper.set_cookies(normalized_cookies)
+
 
 class LibraryService:
     """资源库只读服务。"""
@@ -382,6 +617,20 @@ class LibraryService:
 
         return self.video_repository.list_all(limit=limit)
 
+    def list_source_videos(self, source_id: int, limit: int = 500) -> list[VideoRecord]:
+        """列出某个来源已经同步到本地的视频。"""
+
+        return self.video_repository.list_by_source(source_id=source_id, limit=limit)
+
+    def unlink_video_from_source(self, source_id: int, video_id: int) -> None:
+        """从当前来源文件夹移除视频，但保留视频元数据。"""
+
+        self.video_repository.unlink_from_source(source_id=source_id, video_id=video_id)
+
+
+class DownloadCancelledError(RuntimeError):
+    """下载任务被用户主动取消时抛出的内部异常。"""
+
 
 class DownloadService:
     """下载任务管理服务。"""
@@ -393,26 +642,40 @@ class DownloadService:
         parser: SourceInputParser,
         repository: DownloadTaskRepository,
         auth_session_repository: AuthSessionRepository,
+        video_repository: VideoRepository,
+        source_repository: SourceRepository,
         paths: AppPaths,
         adapter: YtDlpAdapter,
     ) -> None:
         self.parser = parser
         self.repository = repository
         self.auth_session_repository = auth_session_repository
+        self.video_repository = video_repository
+        self.source_repository = source_repository
         self.paths = paths
         self.adapter = adapter
         self._progress_cache: dict[int, int] = {}
+        self._cancel_requests: set[int] = set()
 
-    def queue_url(self, url: str, display_name: str, format_selector: str | None = None) -> int:
+    def queue_url(
+        self,
+        url: str,
+        display_name: str,
+        format_selector: str | None = None,
+        *,
+        video_id: int | None = None,
+        target_dir: str | Path | None = None,
+    ) -> int:
         """先把下载请求写入下载表，为立即执行或后续重试做准备。"""
 
-        target_dir = str(self.paths.downloads_dir)
+        resolved_target_dir = str(target_dir or self.paths.downloads_dir)
         return self.repository.create(
             DownloadTask(
+                video_id=video_id,
                 source_url=url,
                 display_name=display_name,
                 format_selector=format_selector or self.DEFAULT_FORMAT_SELECTOR,
-                target_dir=target_dir,
+                target_dir=resolved_target_dir,
             )
         )
 
@@ -426,14 +689,139 @@ class DownloadService:
         )
         return self.run_task(task_id)
 
+    def queue_video(
+        self,
+        video: VideoRecord,
+        format_selector: str | None = None,
+        *,
+        source: SourceRecord | None = None,
+    ) -> tuple[int | None, bool]:
+        """把一个资源库视频加入下载队列，返回任务 ID 和是否为新建。"""
+
+        if video.id is None:
+            raise ValueError("Video must be saved before it can be queued.")
+        existing = self.repository.find_existing_for_video(video.id)
+        if existing is not None:
+            return existing.id, False
+
+        source = source or self.source_repository.get_primary_for_video(video.id)
+        source_url = video.source_url or f"https://www.bilibili.com/video/{video.bvid}"
+        task_id = self.queue_url(
+            url=source_url,
+            display_name=video.title,
+            format_selector=format_selector,
+            video_id=video.id,
+            target_dir=self._target_dir_for_source(source),
+        )
+        return task_id, True
+
+    def queue_video_id(
+        self,
+        video_id: int,
+        format_selector: str | None = None,
+        *,
+        source_id: int | None = None,
+    ) -> tuple[int | None, bool]:
+        """按本地视频 ID 加入下载队列。"""
+
+        video = self.video_repository.get_by_id(video_id)
+        if video is None:
+            raise ValueError(f"Video #{video_id} was not found.")
+        source = self.source_repository.get_by_id(source_id) if source_id is not None else None
+        return self.queue_video(video=video, format_selector=format_selector, source=source)
+
+    def queue_library_videos(self, *, limit: int = 500, format_selector: str | None = None) -> DownloadQueueResult:
+        """把资源库最近的视频批量加入下载队列。"""
+
+        return self._queue_videos(self.video_repository.list_all(limit=limit), format_selector=format_selector)
+
+    def queue_source_videos(
+        self,
+        source_id: int,
+        *,
+        limit: int = 500,
+        format_selector: str | None = None,
+    ) -> DownloadQueueResult:
+        """把某个来源已同步的视频批量加入下载队列。"""
+
+        source = self.source_repository.get_by_id(source_id)
+        if source is None:
+            raise ValueError(f"Source #{source_id} was not found.")
+        return self._queue_videos(
+            self.video_repository.list_by_source(source_id=source_id, limit=limit),
+            format_selector=format_selector,
+            source=source,
+        )
+
+    def _queue_videos(
+        self,
+        videos: list[VideoRecord],
+        *,
+        format_selector: str | None = None,
+        source: SourceRecord | None = None,
+    ) -> DownloadQueueResult:
+        """批量入队并跳过已存在任务。"""
+
+        task_ids: list[int] = []
+        skipped_count = 0
+        for video in videos:
+            task_id, created = self.queue_video(video=video, format_selector=format_selector, source=source)
+            if created and task_id is not None:
+                task_ids.append(task_id)
+            else:
+                skipped_count += 1
+
+        message = f"已加入 {len(task_ids)} 个下载任务，跳过 {skipped_count} 个已有任务。"
+        return DownloadQueueResult(
+            queued_count=len(task_ids),
+            skipped_count=skipped_count,
+            task_ids=tuple(task_ids),
+            message=message,
+        )
+
+    def _target_dir_for_source(self, source: SourceRecord | None) -> Path:
+        """按资源库导入来源创建下载子目录；没有来源信息时使用总下载目录。"""
+
+        if source is None:
+            return self.paths.downloads_dir
+        folder_name = self._safe_folder_name(source.display_name or source.source_key or f"source-{source.id or 'unknown'}")
+        return self.paths.downloads_dir / folder_name
+
+    def target_dir_for_source_id(self, source_id: int | None) -> Path:
+        """按资源库来源 ID 计算下载目录，供 GUI 单视频格式选择弹窗复用。"""
+
+        source = self.source_repository.get_by_id(source_id) if source_id is not None else None
+        return self._target_dir_for_source(source)
+
+    def _safe_folder_name(self, raw_name: str) -> str:
+        """把来源名称整理成 Windows 可用的文件夹名。"""
+
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", raw_name).strip(" ._")
+        if not cleaned:
+            cleaned = "source"
+        reserved_names = {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            *(f"COM{index}" for index in range(1, 10)),
+            *(f"LPT{index}" for index in range(1, 10)),
+        }
+        if cleaned.upper() in reserved_names:
+            cleaned = f"{cleaned}_source"
+        return cleaned[:80]
+
     def run_task(self, task_id: int) -> DownloadTask:
         """按任务 ID 执行一次真实下载，并把进度持续写回数据库。"""
 
         task = self.repository.get_by_id(task_id)
         if task is None:
             raise ValueError(f"Download task #{task_id} was not found.")
+        if task.status in {DownloadStatus.PAUSED, DownloadStatus.CANCELED}:
+            return task
 
         cookie_file_path: Path | None = None
+        self._cancel_requests.discard(task_id)
         self.repository.update_runtime(
             task_id,
             status=DownloadStatus.RUNNING,
@@ -452,6 +840,12 @@ class DownloadService:
                 cookie_file_path=cookie_file_path,
                 progress_hook=lambda payload: self._handle_progress(task_id, payload),
             )
+        except DownloadCancelledError as exc:
+            self.repository.update_runtime(
+                task_id,
+                status=DownloadStatus.CANCELED,
+                error_message=str(exc),
+            )
         except Exception as exc:
             self.repository.update_runtime(
                 task_id,
@@ -459,15 +853,24 @@ class DownloadService:
                 error_message=str(exc),
             )
         else:
-            self.repository.update_runtime(
-                task_id,
-                status=DownloadStatus.SUCCESS,
-                file_path=result.file_path,
-                progress=100.0,
-                error_message=result.note,
-            )
+            current_task = self.repository.get_by_id(task_id)
+            if task_id in self._cancel_requests or (current_task is not None and current_task.status is DownloadStatus.CANCELED):
+                self.repository.update_runtime(
+                    task_id,
+                    status=DownloadStatus.CANCELED,
+                    error_message="用户已取消下载。",
+                )
+            else:
+                self.repository.update_runtime(
+                    task_id,
+                    status=DownloadStatus.SUCCESS,
+                    file_path=result.file_path,
+                    progress=100.0,
+                    error_message=None,
+                )
         finally:
             self._progress_cache.pop(task_id, None)
+            self._cancel_requests.discard(task_id)
             if cookie_file_path is not None and cookie_file_path.exists():
                 cookie_file_path.unlink(missing_ok=True)
 
@@ -475,6 +878,125 @@ class DownloadService:
         if finished_task is None:
             raise ValueError(f"Download task #{task_id} could not be loaded after execution.")
         return finished_task
+
+    def run_next(self) -> DownloadTask | None:
+        """执行队列中的下一个待下载任务。"""
+
+        tasks = self.repository.list_by_statuses([DownloadStatus.PENDING], limit=1)
+        if not tasks:
+            return None
+        if tasks[0].id is None:
+            return None
+        return self.run_task(tasks[0].id)
+
+    def run_queue(self, *, limit: int = 0) -> list[DownloadTask]:
+        """顺序执行下载队列，limit<=0 表示一直跑到没有 pending 任务。"""
+
+        completed: list[DownloadTask] = []
+        while True:
+            if limit > 0 and len(completed) >= limit:
+                break
+            task = self.run_next()
+            if task is None:
+                break
+            completed.append(task)
+        return completed
+
+    def retry_task(self, task_id: int) -> DownloadTask:
+        """把失败任务重置为 pending，供队列再次执行。"""
+
+        task = self.repository.get_by_id(task_id)
+        if task is None:
+            raise ValueError(f"Download task #{task_id} was not found.")
+        if task.status is not DownloadStatus.FAILED:
+            raise ValueError("只有失败的下载任务可以重试。")
+        self.repository.update_runtime(
+            task_id,
+            status=DownloadStatus.PENDING,
+            progress=0.0,
+            error_message=None,
+        )
+        updated = self.repository.get_by_id(task_id)
+        if updated is None:
+            raise ValueError(f"Download task #{task_id} could not be loaded after retry reset.")
+        return updated
+
+    def update_task_format(self, task_id: int, format_selector: str) -> DownloadTask:
+        """为尚未完成的下载任务重新选择格式，供右键菜单和资源库单视频入口复用。"""
+
+        normalized_selector = (format_selector or self.DEFAULT_FORMAT_SELECTOR).strip()
+        if not normalized_selector:
+            normalized_selector = self.DEFAULT_FORMAT_SELECTOR
+
+        task = self.repository.get_by_id(task_id)
+        if task is None:
+            raise ValueError(f"Download task #{task_id} was not found.")
+        if task.status is DownloadStatus.RUNNING:
+            raise ValueError("正在下载的任务不能安全修改格式，请等待本轮下载结束后再调整。")
+        if task.status is DownloadStatus.SUCCESS:
+            raise ValueError("已完成的任务不能直接修改格式；如需重新下载，请先删除该任务记录后再加入队列。")
+
+        next_status = DownloadStatus.PENDING if task.status in {DownloadStatus.FAILED, DownloadStatus.CANCELED} else task.status
+        self.repository.update_format_selector(
+            task_id,
+            normalized_selector,
+            status=next_status,
+            reset_runtime=task.status in {DownloadStatus.FAILED, DownloadStatus.CANCELED},
+        )
+        updated = self.repository.get_by_id(task_id)
+        if updated is None:
+            raise ValueError(f"Download task #{task_id} could not be loaded after format update.")
+        return updated
+
+    def pause_task(self, task_id: int) -> DownloadTask:
+        """暂停尚未开始的下载任务。"""
+
+        task = self.repository.get_by_id(task_id)
+        if task is None:
+            raise ValueError(f"Download task #{task_id} was not found.")
+        if task.status is DownloadStatus.RUNNING:
+            raise ValueError("正在下载的 yt-dlp 任务不能安全暂停，请等待本轮下载结束后再处理。")
+        if task.status is DownloadStatus.PENDING:
+            self.repository.set_status(task_id, DownloadStatus.PAUSED)
+        return self.repository.get_by_id(task_id) or task
+
+    def resume_task(self, task_id: int) -> DownloadTask:
+        """恢复暂停中的下载任务。"""
+
+        task = self.repository.get_by_id(task_id)
+        if task is None:
+            raise ValueError(f"Download task #{task_id} was not found.")
+        if task.status is DownloadStatus.PAUSED:
+            self.repository.set_status(task_id, DownloadStatus.PENDING)
+        return self.repository.get_by_id(task_id) or task
+
+    def cancel_task(self, task_id: int) -> DownloadTask:
+        """取消尚未完成的下载任务。"""
+
+        task = self.repository.get_by_id(task_id)
+        if task is None:
+            raise ValueError(f"Download task #{task_id} was not found.")
+        if task.status is DownloadStatus.RUNNING:
+            self._cancel_requests.add(task_id)
+            self.repository.set_status(
+                task_id,
+                DownloadStatus.CANCELED,
+                error_message="用户请求取消下载，正在等待 yt-dlp 安全中断。",
+            )
+            return self.repository.get_by_id(task_id) or task
+        if task.status not in {DownloadStatus.SUCCESS, DownloadStatus.CANCELED}:
+            self.repository.set_status(task_id, DownloadStatus.CANCELED)
+        return self.repository.get_by_id(task_id) or task
+
+    def delete_task_record(self, task_id: int) -> None:
+        """删除下载任务记录，不删除磁盘文件。"""
+
+        task = self.repository.get_by_id(task_id)
+        if task is None:
+            raise ValueError(f"Download task #{task_id} was not found.")
+        if task.status is DownloadStatus.RUNNING:
+            raise ValueError("正在下载的任务不能删除，请等待本轮下载结束后再处理。")
+        self.repository.delete(task_id)
 
     def list_tasks(self, limit: int = 100) -> list[DownloadTask]:
         """读取下载任务队列。"""
@@ -508,6 +1030,9 @@ class DownloadService:
 
     def _handle_progress(self, task_id: int, payload: dict) -> None:
         """把 yt-dlp 回调转换成较稳定的百分比进度。"""
+
+        if task_id in self._cancel_requests:
+            raise DownloadCancelledError("用户已取消下载。")
 
         status = payload.get("status")
         if status == "finished":
@@ -688,6 +1213,15 @@ class SettingsService:
         self.settings = saved
         return saved
 
+    def set_download_concurrency(self, value: int) -> AppSettings:
+        """保存下载并发数量，并限制在桌面端可控范围内。"""
+
+        normalized_value = max(1, min(8, int(value)))
+        updated = replace(self.settings, download_concurrency=normalized_value)
+        saved = save_settings(self.paths, updated)
+        self.settings = saved
+        return saved
+
     def dismiss_login_intro(self) -> AppSettings:
         """关闭登录页首次提示，并把结果写入本地设置。"""
 
@@ -732,6 +1266,8 @@ class AppContext:
     settings: AppSettings
     database: Database
     bilibili_client: BilibiliClient
+    user_archive_scraper: BrowserUserArchiveScraper
+    browser_user_search: BrowserUserSearch
     auth_session_repository: AuthSessionRepository
     source_repository: SourceRepository
     video_repository: VideoRepository
@@ -754,6 +1290,8 @@ def build_context(root: Path | None = None) -> AppContext:
     settings = load_settings(paths)
     database = Database(paths.database_path)
     bilibili_client = BilibiliClient(settings=settings)
+    user_archive_scraper = BrowserUserArchiveScraper(user_agent=settings.user_agent)
+    browser_user_search = BrowserUserSearch(user_agent=settings.user_agent)
 
     auth_session_repository = AuthSessionRepository(database)
     source_repository = SourceRepository(database)
@@ -771,12 +1309,17 @@ def build_context(root: Path | None = None) -> AppContext:
         video_repository=video_repository,
         sync_task_repository=sync_task_repository,
         client=bilibili_client,
+        auth_session_repository=auth_session_repository,
+        user_archive_scraper=user_archive_scraper,
+        browser_user_search=browser_user_search,
     )
     library_service = LibraryService(video_repository=video_repository)
     download_service = DownloadService(
         parser=SourceInputParser(),
         repository=download_task_repository,
         auth_session_repository=auth_session_repository,
+        video_repository=video_repository,
+        source_repository=source_repository,
         paths=paths,
         adapter=YtDlpAdapter(user_agent=settings.user_agent),
     )
@@ -792,6 +1335,8 @@ def build_context(root: Path | None = None) -> AppContext:
         settings=settings,
         database=database,
         bilibili_client=bilibili_client,
+        user_archive_scraper=user_archive_scraper,
+        browser_user_search=browser_user_search,
         auth_session_repository=auth_session_repository,
         source_repository=source_repository,
         video_repository=video_repository,

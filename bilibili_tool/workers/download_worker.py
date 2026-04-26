@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from bilibili_tool.infra.download import YtDlpAdapter
+from bilibili_tool.application.services import DownloadService
+from bilibili_tool.domain import DownloadTask
 
 
 @dataclass(slots=True)
 class DownloadWorker:
-    """下载 worker 入口，占位给下一阶段接上任务队列。"""
+    """下载 worker 入口，消费数据库中的 pending 任务。"""
 
-    adapter: YtDlpAdapter
+    service: DownloadService
 
-    def run_once(self) -> None:
-        """下一阶段会在这里消费数据库里的下载任务。"""
+    def run_once(self) -> DownloadTask | None:
+        """执行一个 pending 下载任务，没有任务时返回 None。"""
 
-        raise NotImplementedError("Download worker is planned for the next milestone.")
-
+        return self.service.run_next()

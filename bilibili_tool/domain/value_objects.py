@@ -153,6 +153,31 @@ class FavoriteSyncResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceSyncResult:
+    """描述一次来源同步的最终结果，覆盖 UP 主投稿和完整收藏夹同步。"""
+
+    success: bool
+    source_id: int
+    source_name: str
+    source_kind: SourceKind
+    message: str
+    synced_count: int
+    new_count: int
+    updated_count: int
+    page_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadQueueResult:
+    """描述一次批量加入下载队列的结果。"""
+
+    queued_count: int
+    skipped_count: int
+    task_ids: tuple[int, ...]
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class VideoFormatOption:
     """描述一个视频当前可用的下载格式。"""
 

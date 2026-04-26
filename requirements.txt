@@ -1,2 +1,8 @@
-# Use the local pyproject as the single dependency source of truth.
--e .
+# Runtime dependencies for bilibiliTool.
+# Python 3.11 is recommended.
+
+httpx>=0.27,<0.29
+pydantic>=2.7,<3.0
+PySide6>=6.8,<6.10
+qrcode[pil]>=7.4,<8.0
+yt-dlp>=2025.3.31
