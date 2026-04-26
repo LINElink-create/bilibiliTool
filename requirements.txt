@@ -1,6 +1,8 @@
-beautifulsoup4==4.12.2
-kdl==0.2.21
-Requests==2.31.0
-selenium==4.9.0
-PySide6==6.9.0
-yt-dlp==2025.12.8
+# Runtime dependencies for bilibiliTool.
+# Python 3.11 is recommended.
+
+httpx>=0.27,<0.29
+pydantic>=2.7,<3.0
+PySide6>=6.8,<6.10
+qrcode[pil]>=7.4,<8.0
+yt-dlp>=2025.3.31

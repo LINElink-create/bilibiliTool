@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bilibiliTool"
+version = "0.1.0"
+description = "Desktop-first bilibili source sync and download manager."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Codex" }
+]
+dependencies = [
+  "httpx>=0.27,<0.29",
+  "pydantic>=2.7,<3.0",
+  "PySide6>=6.8,<6.10",
+  "qrcode[pil]>=7.4,<8.0",
+  "yt-dlp>=2025.3.31",
+]
+
+[project.optional-dependencies]
+build = [
+  "pyinstaller>=6.0",
+]
+
+[project.scripts]
+bilibili-tool = "bilibili_tool.app.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["bilibili_tool*"]
